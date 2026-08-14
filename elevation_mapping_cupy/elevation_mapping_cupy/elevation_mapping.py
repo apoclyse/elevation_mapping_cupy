@@ -482,12 +482,6 @@ class ElevationMap:
             None:
         """
         raw_points = cp.asarray(raw_points, dtype=self.data_type)
-        
-        # Check for the sanity of the raw points
-        min_points = cp.min(raw_points, axis=0)
-        max_points = cp.max(raw_points, axis=0)
-        mean_points = cp.mean(raw_points, axis=0)
-                
         additional_channels = channels[3:]
         raw_points = raw_points[~cp.isnan(raw_points[:, :3]).any(axis=1)]
         self.update_map_with_kernel(

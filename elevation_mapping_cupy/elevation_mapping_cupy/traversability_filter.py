@@ -5,46 +5,83 @@
 import cupy as cp
 
 
-def get_filter_torch(*args, **kwargs):
-    import torch
-    import torch.nn as nn
+def get_filter_torch(w1, w2, w3, w_out, **kwargs):
+    import cupy as cp
+    import cupyx.scipy.ndimage as ndimage
 
-    class TraversabilityFilter(nn.Module):
-        def __init__(self, w1, w2, w3, w_out, device="cuda", use_bias=False):
-            super(TraversabilityFilter, self).__init__()
-            self.conv1 = nn.Conv2d(1, 4, 3, dilation=1, padding=0, bias=use_bias)
-            self.conv2 = nn.Conv2d(1, 4, 3, dilation=2, padding=0, bias=use_bias)
-            self.conv3 = nn.Conv2d(1, 4, 3, dilation=3, padding=0, bias=use_bias)
-            self.conv_out = nn.Conv2d(12, 1, 1, bias=use_bias)
+    class TraversabilityFilterCuPy:
+        def __init__(self, w1, w2, w3, w_out):
+            self.w1 = cp.asarray(w1, dtype=cp.float32)
+            self.w2 = cp.asarray(w2, dtype=cp.float32)
+            self.w3 = cp.asarray(w3, dtype=cp.float32)
+            self.w_out_flat = cp.asarray(w_out[0, :, 0, 0], dtype=cp.float32)
 
-            # Set weights.
-            self.conv1.weight = nn.Parameter(torch.from_numpy(w1).float())
-            self.conv2.weight = nn.Parameter(torch.from_numpy(w2).float())
-            self.conv3.weight = nn.Parameter(torch.from_numpy(w3).float())
-            self.conv_out.weight = nn.Parameter(torch.from_numpy(w_out).float())
+            # Pre-prepare kernels for efficiency
+            self.kernels1 = [self.w1[c, 0] for c in range(4)]
+
+            self.kernels2 = []
+            for c in range(4):
+                k3 = self.w2[c, 0]
+                k5 = cp.zeros((5, 5), dtype=cp.float32)
+                for i in range(3):
+                    for j in range(3):
+                        k5[i*2, j*2] = k3[i, j]
+                self.kernels2.append(k5)
+
+            self.kernels3 = []
+            for c in range(4):
+                k3 = self.w3[c, 0]
+                k7 = cp.zeros((7, 7), dtype=cp.float32)
+                for i in range(3):
+                    for j in range(3):
+                        k7[i*3, j*3] = k3[i, j]
+                self.kernels3.append(k7)
 
         def __call__(self, elevation_cupy):
-            # Convert cupy tensor to pytorch.
-            elevation_cupy = elevation_cupy.astype(cp.float32)
-            elevation = torch.as_tensor(elevation_cupy, device=self.conv1.weight.device)
+            # Input is (202, 202) CuPy array
+            H, W = elevation_cupy.shape
+            out1 = cp.zeros((4, H, W), dtype=cp.float32)
+            out2 = cp.zeros((4, H, W), dtype=cp.float32)
+            out3 = cp.zeros((4, H, W), dtype=cp.float32)
 
-            with torch.no_grad():
-                out1 = self.conv1(elevation.view(-1, 1, elevation.shape[0], elevation.shape[1]))
-                out2 = self.conv2(elevation.view(-1, 1, elevation.shape[0], elevation.shape[1]))
-                out3 = self.conv3(elevation.view(-1, 1, elevation.shape[0], elevation.shape[1]))
+            # Conv1
+            for c in range(4):
+                out1[c] = ndimage.correlate(elevation_cupy, self.kernels1[c], mode='constant', cval=0.0)
 
-                out1 = out1[:, :, 2:-2, 2:-2]
-                out2 = out2[:, :, 1:-1, 1:-1]
-                out = torch.cat((out1, out2, out3), dim=1)
-                # out = F.concat((out1, out2, out3), axis=1)
-                out = self.conv_out(out.abs())
-                out = torch.exp(-out)
-                out_cupy = cp.asarray(out)
+            # Conv2 (dilated 2)
+            for c in range(4):
+                out2[c] = ndimage.correlate(elevation_cupy, self.kernels2[c], mode='constant', cval=0.0)
 
-            return out_cupy
+            # Conv3 (dilated 3)
+            for c in range(4):
+                out3[c] = ndimage.correlate(elevation_cupy, self.kernels3[c], mode='constant', cval=0.0)
 
-    traversability_filter = TraversabilityFilter(*args, **kwargs).cuda().eval()
-    return traversability_filter
+            # Crop to valid region (equivalent to PyTorch padding=0 / crop)
+            out1_cropped = out1[:, 3:-3, 3:-3]
+            out2_cropped = out2[:, 3:-3, 3:-3]
+            out3_cropped = out3[:, 3:-3, 3:-3]
+
+            # Concatenate along channel axis
+            out = cp.concatenate((out1_cropped, out2_cropped, out3_cropped), axis=0)
+            
+            # Apply absolute activation before final 1x1 convolution
+            out = cp.abs(out)
+
+            # 1x1 convolution output
+            out_conv = cp.sum(out * self.w_out_flat[:, cp.newaxis, cp.newaxis], axis=0)
+            
+            # Exp activation
+            out_conv = cp.exp(-out_conv)
+
+            return out_conv[cp.newaxis, cp.newaxis, :, :]
+
+        def cuda(self):
+            return self
+
+        def eval(self):
+            return self
+
+    return TraversabilityFilterCuPy(w1, w2, w3, w_out)
 
 
 def get_filter_chainer(*args, **kwargs):

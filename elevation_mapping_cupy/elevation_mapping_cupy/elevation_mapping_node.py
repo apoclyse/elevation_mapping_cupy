@@ -744,9 +744,8 @@ class ElevationMappingNode(Node):
 
     def pointcloud_callback(self, msg: PointCloud2, sub_key: str) -> None:
         self._last_t = msg.header.stamp
-        # self.get_logger().info(f"Received pointcloud with {msg.width} points")
-
         pts = _pointcloud2_xyz_f32(msg)
+        self.get_logger().info(f"Received pointcloud: raw {msg.width*msg.height}, valid {len(pts)} points", throttle_duration_sec=2.0)
         if pts.size == 0:
             return
 
